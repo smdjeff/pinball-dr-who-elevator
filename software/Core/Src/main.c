@@ -1,104 +1,178 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * <h2><center>&copy; Copyright (c) 2021 STMicroelectronics.
-  * All rights reserved.</center></h2>
-  *
-  * This software component is licensed by ST under BSD 3-Clause license,
-  * the "License"; You may not use this file except in compliance with the
-  * License. You may obtain a copy of the License at:
-  *                        opensource.org/licenses/BSD-3-Clause
-  *
-  ******************************************************************************
-  */
-/* USER CODE END Header */
-/* Includes ------------------------------------------------------------------*/
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// main.c
+// Copyright © 2021 Jeffrey Mathews All rights reserved.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+
 #include "main.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
 
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-/* USER CODE BEGIN PFP */
 
-/* USER CODE END PFP */
 
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
+const int stepsPerLevel = 1000;
 
-/* USER CODE END 0 */
+typedef enum {
+    left    = 0,
+    right   = 1,
+    limit   = 2
+} button_t;
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
-int main(void)
-{
-  /* USER CODE BEGIN 1 */
+typedef enum {
+    cw = 1,
+    ccw = -1
+} direction_t;
 
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
-  SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  /* USER CODE BEGIN 2 */
-
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
+static uint8_t readPin(button_t id) {
+  switch ( id ) {
+    case left:
+      return HAL_GPIO_ReadPin( SW0_GPIO_Port, SW0_Pin ); 
+    case right: 
+      return HAL_GPIO_ReadPin( SW1_GPIO_Port, SW1_Pin ); 
+    case limit: 
+      return HAL_GPIO_ReadPin( LIMIT_GPIO_Port, LIMIT_Pin ); 
   }
-  /* USER CODE END 3 */
+  return 0;
 }
+
+static bool debouncedSwitch(button_t id) {
+    static uint32_t lastDebounceTime[3] = {0,0,0};
+    static uint8_t buttonState[3] = {1,1,1};
+    static uint8_t lastButtonState[3] = {1,1,1};
+    uint32_t millis = HAL_GetTick();
+    uint8_t reading = readPin( id );
+    if ( reading != lastButtonState[id] ) {
+      lastDebounceTime[id] = millis;
+    }
+    uint32_t debounceDelay = buttonState[id] ? 25 : 250;
+    if ( (millis - lastDebounceTime[id]) > debounceDelay ) {
+      if ( reading != buttonState[id] ) {
+        buttonState[id] = reading;
+        if ( reading == 0 ) { // button is active low
+          lastButtonState[id] = reading;
+          return true;
+        }
+      }
+    }
+    lastButtonState[id] = reading;
+    return false; // button released or button hasn't changed
+}
+
+static int move(direction_t direction, int steps) {
+  static int position = 0;
+  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, (direction==cw) ? 0:1 );
+  for (int i=0; i<steps; i++) {
+    HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
+    HAL_Delay(50);
+    HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
+    HAL_Delay(50);
+  }
+  position += steps * direction;
+  return position;
+}
+
+static void writeWilliams(int direction, int position) {
+  static int ix = 0;
+  // convert the motor position to something the factory williams game
+  // thinks is the rotating cam and home opto input.
+  // cw -> 
+  // ccw <- 
+  uint8_t values[] = { 0, // first floor 
+                       1,1,1,1,1,1,1, // second floor
+                       0,0,0,0,0,0,0, // thrid floor 
+                       1,0,0,0,0,1,1,1,1, // second floor
+                       0,0,0,0, 1,1,1 // first floor 
+                     };
+  ix += direction;
+  if ( ix < 0 ) {
+    ix = sizeof(values)-1;
+  } else {
+    if ( ix >= sizeof(values) ) {
+      ix = 0;
+    }
+  }
+  HAL_GPIO_WritePin( HOME_GPIO_Port, HOME_Pin, values[ix] );
+}
+
+static void readWilliams(void) {
+  int enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
+  int direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
+
+  if ( enable ) {
+      if ( direction ) {
+        move( cw, 1000 );
+      } else {
+        move( ccw, 1000 );
+      }
+      // and while that's going, start sending writeWilliams values 
+  }
+}
+
+
+int main(void) {
+  
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+
+  HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0 );
+  HAL_GPIO_WritePin( S_NRST_GPIO_Port, S_NRST_Pin, 0 );
+  
+  // full steps
+  HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
+  HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
+  HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
+
+
+  // home stepper
+  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, 0 );
+  do {
+      HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
+      HAL_Delay(50);
+      HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
+      HAL_Delay(50);
+  } while ( HAL_GPIO_ReadPin( LIMIT_GPIO_Port, LIMIT_Pin ) == 1 );
+
+
+  while (1) {
+    
+    uint32_t tick = HAL_GetTick();
+    
+    if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
+      printf("stepper driver fault detected!");
+      HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
+      for (;;) { }
+    }
+      
+    
+    if ( debouncedSwitch( left ) && debouncedSwitch( right ) ) {
+      // record position
+    } else {
+
+      if ( debouncedSwitch( left ) ) {
+          // move up a bit
+      }
+  
+      if ( debouncedSwitch( right ) ) {
+          // move down a bit
+      }
+      
+    }
+
+    
+  }
+}
+
+
+
 
 /**
   * @brief System Clock Configuration
