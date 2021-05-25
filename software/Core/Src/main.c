@@ -20,13 +20,13 @@ static void MX_GPIO_Init(void);
 #define HAL_GPIO_WritePin(port,pin,value)   do { if(value) LL_GPIO_SetOutputPin(port,pin); else LL_GPIO_ResetOutputPin(port,pin); } while(0);
 #define HAL_Delay(ms)                       LL_mDelay(ms) 
 #define HAL_GetTick()                       systick
+#define SystemCoreClock                     2097000
 
-
-static uint64_t systick = 0;
+static volatile uint32_t systick = 0;
+// from stm32l0xx_it.c ((weak))
 void SysTick_Handler(void) {
   systick++;
 }
-
 
 typedef enum {
     left    = 0,
@@ -131,6 +131,7 @@ int main(void) {
   LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
   SystemClock_Config();
+  SysTick_Config(SystemCoreClock / 1000);
   MX_GPIO_Init();
 
   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0 );
