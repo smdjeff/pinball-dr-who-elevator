@@ -182,6 +182,13 @@ $(BUILD_DIR):
 clean:
 	-rm -fR $(BUILD_DIR)
   
+	
+#######################################
+# program device
+#######################################
+flash: $(BUILD_DIR)/$(TARGET).hex
+	/Applications/STMicroelectronics/STM32Cube/STM32CubeProgrammer/STM32CubeProgrammer.app/Contents/MacOs/bin/STM32_Programmer_CLI -c port=SWD -ob NRST_MODE=3 -e all -w $(BUILD_DIR)/$(TARGET).hex -rst -run
+	
 #######################################
 # dependencies
 #######################################
