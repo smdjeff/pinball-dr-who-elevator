@@ -135,7 +135,7 @@ int main(void) {
   MX_GPIO_Init();
 
   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0 );
-  HAL_GPIO_WritePin( S_NRST_GPIO_Port, S_NRST_Pin, 0 );
+  HAL_GPIO_WritePin( S_NRST_GPIO_Port, S_NRST_Pin, 1 );
   
   // full steps
   HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
