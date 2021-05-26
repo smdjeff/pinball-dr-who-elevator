@@ -18,15 +18,31 @@ static void MX_GPIO_Init(void);
 
 #define HAL_GPIO_ReadPin(port,pin)          LL_GPIO_IsInputPinSet(port,pin)
 #define HAL_GPIO_WritePin(port,pin,value)   do { if(value) LL_GPIO_SetOutputPin(port,pin); else LL_GPIO_ResetOutputPin(port,pin); } while(0);
-#define HAL_Delay(ms)                       LL_mDelay(ms) 
-#define HAL_GetTick()                       systick
+#define HAL_GetTick()                       (systick * 1000 / SystemTickUs)
+#define HAL_Delay(ms)                       delayMs(ms)
+#define delayMs(ms)                         LL_mDelay(((ms) * 1000) / SystemTickUs)
+#define delayUs(us)                         LL_mDelay((us) / SystemTickUs)
+
 #define SystemCoreClock                     2097000
 
+// #define SystemTickUs                        1000U
+#define SystemTickUs                        50
+
+//#define rodInchesPerRotation                0.1
+#define rodInchesPerRotation                0.3
+
+#define stepsPerRotation                    200.0
+#define stepsPerInch                        (stepsPerRotation / rodInchesPerRotation)
+#define stepsPerLevel                       ((3.5/2.0) * stepsPerInch )
+#define stepsPerCamDegree                   (stepsPerLevel / 90.0)
+
+
 static volatile uint32_t systick = 0;
-// from stm32l0xx_it.c ((weak))
+// called from stm32l0xx_it.c weak link ISR
 void SysTick_Handler(void) {
   systick++;
 }
+
 
 typedef enum {
     left    = 0,
@@ -74,17 +90,38 @@ static bool debouncedSwitch(button_t id) {
     return false; // button released or button hasn't changed
 }
 
-static int move(direction_t direction, int steps) {
+const int slope = 50000;
+const int ramp[] = { 
+  12800,  // 78Hz
+  6400,   // 156Hz
+  3200,   // 312Hz
+  1600,   // 625Hz
+  800,    // 1.25kHz
+  400,    // 2.5kHz
+  200,    // 5kHz
+  100,    // 10kHz
+  50      // 20kHz
+};
+
+static float camAngle = 0;
+
+static void move(direction_t direction, int steps) {
   static int position = 0;
   HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, (direction==cw) ? 0:1 );
+  int ix = 0;
+  int iy = slope / ramp[ 0 ] ; 
   for (int i=0; i<steps; i++) {
+    if ( iy-- == 0 ) {
+      if ( ix < (sizeof(ramp)/sizeof(ramp[0]))-1 ) {
+        iy = slope / ramp[ ix++ ];
+      }
+    }
+    delayUs( ramp[ ix ] );
     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
-    HAL_Delay(50);
+    delayUs( ramp[ ix ] );
     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
-    HAL_Delay(50);
   }
-  position += steps * direction;
-  return position;
+  camAngle += (steps * direction) / stepsPerCamDegree;
 }
 
 static void writeWilliams(int direction, int position) {
@@ -141,42 +178,85 @@ int main(void) {
   HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
   HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
   HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
+  // 
+  // // 1/2 step
+  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 1 );
+  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
+  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
+  // 
+  // // 1/4 step
+  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
+  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
+  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
+  // 
+  // // 1/8 step
+  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 1 );
+  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
+  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
+  // 
+  // // 1/16 step
+  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
+  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
+  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 1 );
+  // 
+  // // 1/32 step
+  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
+  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
+  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 1 );
 
 
-  // home stepper
-  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, 0 );
-  do {
-      HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
-      HAL_Delay(50);
-      HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
-      HAL_Delay(50);
-  } while ( HAL_GPIO_ReadPin( LIMIT_GPIO_Port, LIMIT_Pin ) == 1 );
-
+  // // home stepper
+  // HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, 0 );
+  // do {
+  //     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
+  //     HAL_Delay(50);
+  //     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
+  //     HAL_Delay(50);
+  // } while ( HAL_GPIO_ReadPin( LIMIT_GPIO_Port, LIMIT_Pin ) == 1 );
+  // 
 
   while (1) {
     
     uint32_t tick = HAL_GetTick();
+    static uint32_t lasttick = 0;
     
-    if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
-      printf("stepper driver fault detected!");
-      HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
-      for (;;) { }
+    if (tick-lasttick > 500) {
+      lasttick = tick;
+      //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, ! HAL_GPIO_ReadPin(S_NEN_GPIO_Port,S_NEN_Pin) );
     }
       
-    
-    if ( debouncedSwitch( left ) && debouncedSwitch( right ) ) {
-      // record position
-    } else {
+    // if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
+    //   printf("stepper driver fault detected!");
+    //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
+    //   for (;;) { }
+    // }
 
+    
+    // 
+    // if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
+    //   printf("stepper driver fault detected!");
+    //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
+    //   for (;;) { }
+    // }
+    // 
+    // 
+    // if ( debouncedSwitch( left ) && debouncedSwitch( right ) ) {
+    //   // record position
+    // } else {
+    // 
       if ( debouncedSwitch( left ) ) {
           // move up a bit
+          move( cw, stepsPerInch*1.0 );
+          //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0);
       }
-  
+    // 
       if ( debouncedSwitch( right ) ) {
           // move down a bit
+          move( ccw, stepsPerInch*1.0 );
+          //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1);
       }
-      
-    }
+    // 
+    // }
 
     
   }
@@ -214,9 +294,9 @@ void SystemClock_Config(void)
 
   }
 
-  LL_Init1msTick(2097000);
+  LL_InitTick(SystemCoreClock, (uint32_t)SystemTickUs);
 
-  LL_SetSystemCoreClock(2097000);
+  LL_SetSystemCoreClock(SystemCoreClock);
 }
 
 /**
