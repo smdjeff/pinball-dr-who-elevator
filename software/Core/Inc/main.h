@@ -73,12 +73,14 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LIMIT_Pin LL_GPIO_PIN_9
 #define LIMIT_GPIO_Port GPIOB
+#define LIMIT_EXTI_IRQn EXTI4_15_IRQn
 #define SW0_Pin LL_GPIO_PIN_14
 #define SW0_GPIO_Port GPIOC
 #define SW1_Pin LL_GPIO_PIN_15
 #define SW1_GPIO_Port GPIOC
 #define S_NFLT_Pin LL_GPIO_PIN_0
 #define S_NFLT_GPIO_Port GPIOA
+#define S_NFLT_EXTI_IRQn EXTI0_1_IRQn
 #define HOME_Pin LL_GPIO_PIN_1
 #define HOME_GPIO_Port GPIOA
 #define S_STEP_Pin LL_GPIO_PIN_2

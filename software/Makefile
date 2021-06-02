@@ -43,7 +43,7 @@ Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_pwr.c \
 Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_exti.c \
 Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_rcc.c \
 Drivers/STM32L0xx_HAL_Driver/Src/stm32l0xx_ll_utils.c \
-Core/Src/system_stm32l0xx.c  
+Core/Src/system_stm32l0xx.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -114,7 +114,6 @@ C_INCLUDES =  \
 -ICore/Inc \
 -IDrivers/STM32L0xx_HAL_Driver/Inc \
 -IDrivers/CMSIS/Device/ST/STM32L0xx/Include \
--IDrivers/CMSIS/Include \
 -IDrivers/CMSIS/Include
 
 
@@ -187,7 +186,7 @@ clean:
 # program device
 #######################################
 flash: $(BUILD_DIR)/$(TARGET).hex
-	/Applications/STMicroelectronics/STM32Cube/STM32CubeProgrammer/STM32CubeProgrammer.app/Contents/MacOs/bin/STM32_Programmer_CLI -c port=SWD -ob NRST_MODE=3 -e all -w $(BUILD_DIR)/$(TARGET).hex -rst -run
+	/Applications/STMicroelectronics/STM32Cube/STM32CubeProgrammer/STM32CubeProgrammer.app/Contents/MacOs/bin/STM32_Programmer_CLI -c port=SWD -ob nBOOT_SEL=1 nBOOT0=1 BOR_LEV=12 -e all -w $(BUILD_DIR)/$(TARGET).hex -rst -run
 	
 #######################################
 # dependencies

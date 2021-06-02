@@ -13,34 +13,49 @@
 
 #include "main.h"
 
+
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 
 #define HAL_GPIO_ReadPin(port,pin)          LL_GPIO_IsInputPinSet(port,pin)
-#define HAL_GPIO_WritePin(port,pin,value)   do { if(value) LL_GPIO_SetOutputPin(port,pin); else LL_GPIO_ResetOutputPin(port,pin); } while(0);
-#define HAL_GetTick()                       (systick * 1000 / SystemTickUs)
-#define HAL_Delay(ms)                       delayMs(ms)
-#define delayMs(ms)                         LL_mDelay(((ms) * 1000) / SystemTickUs)
-#define delayUs(us)                         LL_mDelay((us) / SystemTickUs)
+#define HAL_GPIO_WritePin(port,pin,value)   do { if(value) LL_GPIO_SetOutputPin(port,pin); else LL_GPIO_ResetOutputPin(port,pin); } while(0)
 
-#define SystemCoreClock                     2097000
+#define HAL_GetTick()                       (systick)
+// tuned at 10s, assumes 32MHz sysclock
+#define delayUs(us)                         for (int i=0;i<us*6;i++){ asm("nop"); }
 
-// #define SystemTickUs                        1000U
-#define SystemTickUs                        50
-
-//#define rodInchesPerRotation                0.1
-#define rodInchesPerRotation                0.3
-
-#define stepsPerRotation                    200.0
+// tuned on 6/1/2021
+#define rodInchesPerRotation                0.316
+#define stepsPerRotation                    200
 #define stepsPerInch                        (stepsPerRotation / rodInchesPerRotation)
-#define stepsPerLevel                       ((3.5/2.0) * stepsPerInch )
-#define stepsPerCamDegree                   (stepsPerLevel / 90.0)
+#define stepsPerLevel                       ((3.5/2) * stepsPerInch )
+#define stepsPerCamDegree                   (stepsPerLevel / 90)
+
+#define STEP_RAMP                           4
+#define STEP_SIZE                           400
+
 
 
 static volatile uint32_t systick = 0;
 // called from stm32l0xx_it.c weak link ISR
-void SysTick_Handler(void) {
+void mySysTick_Handler(void) {
   systick++;
+}
+
+bool fault = false;
+
+void myIRQ_0_1(void) {
+  // #define S_NFLT_Pin LL_GPIO_PIN_0
+  // #define S_NFLT_GPIO_Port GPIOA
+  // #define S_NFLT_EXTI_IRQn EXTI0_1_IRQn
+  fault = true;
+}
+
+void myIRQ_4_15(void) {  
+  // #define LIMIT_Pin LL_GPIO_PIN_9
+  // #define LIMIT_GPIO_Port GPIOB
+  // #define LIMIT_EXTI_IRQn EXTI4_15_IRQn
+  //fault = true;
 }
 
 
@@ -90,38 +105,54 @@ static bool debouncedSwitch(button_t id) {
     return false; // button released or button hasn't changed
 }
 
-const int slope = 50000;
-const int ramp[] = { 
-  12800,  // 78Hz
-  6400,   // 156Hz
-  3200,   // 312Hz
-  1600,   // 625Hz
-  800,    // 1.25kHz
-  400,    // 2.5kHz
-  200,    // 5kHz
-  100,    // 10kHz
-  50      // 20kHz
-};
+// static float camAngle = 0;
 
-static float camAngle = 0;
+
+static void stepDirection(direction_t direction) {
+  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, (direction==cw) ? 0:1 );
+}
+
+static void stepSingle(void) {
+  delayUs( STEP_SIZE );
+  LL_GPIO_SetOutputPin( S_STEP_GPIO_Port, S_STEP_Pin );
+  delayUs( STEP_SIZE );
+  LL_GPIO_ResetOutputPin( S_STEP_GPIO_Port, S_STEP_Pin );
+}
+
+static int stepSize(uint8_t sz) {
+  HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, sz&0x01 );
+  HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, sz&0x02 );
+  HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, sz&0x04 );
+  // 0=full, 1=1/2 step, 2=1/4 step, 3=1/8th step, 4=1/16th, 5,6,7=32th
+  const int m[] = {1,2,4,8,16,32};
+  return m[sz];
+}
 
 static void move(direction_t direction, int steps) {
-  static int position = 0;
-  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, (direction==cw) ? 0:1 );
-  int ix = 0;
-  int iy = slope / ramp[ 0 ] ; 
-  for (int i=0; i<steps; i++) {
-    if ( iy-- == 0 ) {
-      if ( ix < (sizeof(ramp)/sizeof(ramp[0]))-1 ) {
-        iy = slope / ramp[ ix++ ];
-      }
+  stepDirection( direction );
+
+  // accelerate...
+  for (int j=5; j>=0; j--) {
+    int m = stepSize( j );
+    for (int i=0; i<m*STEP_RAMP; i++) {
+      stepSingle();
     }
-    delayUs( ramp[ ix ] );
-    HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
-    delayUs( ramp[ ix ] );
-    HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
   }
-  camAngle += (steps * direction) / stepsPerCamDegree;
+
+  // flat
+  for (int i=STEP_RAMP*6*2; i<steps; i++) {
+    stepSingle();
+  }
+
+  // decelerate...
+  for (int j=0; j<=5; j++) {
+    int m = stepSize( j );
+    for (int i=0; i<m*STEP_RAMP; i++) {
+      stepSingle();
+    }
+  }
+
+  //camAngle += (steps * direction) / stepsPerCamDegree;
 }
 
 static void writeWilliams(int direction, int position) {
@@ -163,104 +194,67 @@ static void readWilliams(void) {
 
 
 
-int main(void) {
-  
+
+int main(void)
+{
   LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
   LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
   SystemClock_Config();
   SysTick_Config(SystemCoreClock / 1000);
   MX_GPIO_Init();
-
+  
+  // NVIC_SetPriority(LIMIT_EXTI_IRQn, 1, 0);
+  NVIC_EnableIRQ(LIMIT_EXTI_IRQn);
+  // NVIC_SetPriority(S_NFLT_EXTI_IRQn, 1, 0);
+  NVIC_EnableIRQ(S_NFLT_EXTI_IRQn);
+  
   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0 );
   HAL_GPIO_WritePin( S_NRST_GPIO_Port, S_NRST_Pin, 1 );
+
+  // move off the switch (we're probably on it)
+  int m = stepSize( 4 );
+  stepDirection( ccw );
+  for (int i=0; i<stepsPerRotation*m; i++) {
+    stepSingle();
+  }
+
+  // find the switch at slow speed
+  stepSize( 4 );
+  stepDirection( cw );
+  int ct = 0;
+  do {
+    stepSingle();
+    if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == 1 ) { ct++; } else { ct=0; }
+  } while ( ct < 4 ); // debounce
+    
+  fault = false;
   
-  // full steps
-  HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
-  HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
-  HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
-  // 
-  // // 1/2 step
-  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 1 );
-  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
-  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
-  // 
-  // // 1/4 step
-  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
-  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
-  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
-  // 
-  // // 1/8 step
-  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 1 );
-  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
-  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 0 );
-  // 
-  // // 1/16 step
-  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
-  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 0 );
-  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 1 );
-  // 
-  // // 1/32 step
-  // HAL_GPIO_WritePin( S_M0_GPIO_Port, S_M0_Pin, 0 );
-  // HAL_GPIO_WritePin( S_M1_GPIO_Port, S_M1_Pin, 1 );
-  // HAL_GPIO_WritePin( S_M2_GPIO_Port, S_M2_Pin, 1 );
-
-
-  // // home stepper
-  // HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, 0 );
-  // do {
-  //     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 1 );
-  //     HAL_Delay(50);
-  //     HAL_GPIO_WritePin( S_STEP_GPIO_Port, S_STEP_Pin, 0 );
-  //     HAL_Delay(50);
-  // } while ( HAL_GPIO_ReadPin( LIMIT_GPIO_Port, LIMIT_Pin ) == 1 );
-  // 
-
   while (1) {
     
     uint32_t tick = HAL_GetTick();
     static uint32_t lasttick = 0;
+
+    if ( fault ) {
+      if (tick-lasttick > 500) {
+        lasttick = tick;
+        HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, ! HAL_GPIO_ReadPin(S_NEN_GPIO_Port,S_NEN_Pin) );
+      }
+    }
     
-    if (tick-lasttick > 500) {
-      lasttick = tick;
-      //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, ! HAL_GPIO_ReadPin(S_NEN_GPIO_Port,S_NEN_Pin) );
+    if ( debouncedSwitch( left ) ) {
+      // move up a bit
+      move( cw, stepsPerLevel );
+    }
+    if ( debouncedSwitch( right ) ) {
+      // move down a bit
+      move( ccw, stepsPerLevel );
     }
       
-    // if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
-    //   printf("stepper driver fault detected!");
-    //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
-    //   for (;;) { }
-    // }
-
-    
-    // 
-    // if ( HAL_GPIO_ReadPin( S_NFLT_GPIO_Port, S_NFLT_Pin ) ) {
-    //   printf("stepper driver fault detected!");
-    //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
-    //   for (;;) { }
-    // }
-    // 
-    // 
-    // if ( debouncedSwitch( left ) && debouncedSwitch( right ) ) {
-    //   // record position
-    // } else {
-    // 
-      if ( debouncedSwitch( left ) ) {
-          // move up a bit
-          move( cw, stepsPerInch*1.0 );
-          //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0);
-      }
-    // 
-      if ( debouncedSwitch( right ) ) {
-          // move down a bit
-          move( ccw, stepsPerInch*1.0 );
-          //HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1);
-      }
-    // 
-    // }
-
-    
   }
+  
 }
+
+
 
 
 /**
@@ -269,34 +263,41 @@ int main(void) {
   */
 void SystemClock_Config(void)
 {
-  LL_FLASH_SetLatency(LL_FLASH_LATENCY_0);
-  while(LL_FLASH_GetLatency()!= LL_FLASH_LATENCY_0)
+  LL_FLASH_SetLatency(LL_FLASH_LATENCY_1);
+  while(LL_FLASH_GetLatency()!= LL_FLASH_LATENCY_1)
   {
   }
   LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE1);
-  LL_RCC_MSI_Enable();
+  LL_RCC_HSI_Enable();
 
-   /* Wait till MSI is ready */
-  while(LL_RCC_MSI_IsReady() != 1)
+   /* Wait till HSI is ready */
+  while(LL_RCC_HSI_IsReady() != 1)
   {
 
   }
-  LL_RCC_MSI_SetRange(LL_RCC_MSIRANGE_5);
-  LL_RCC_MSI_SetCalibTrimming(0);
+  LL_RCC_HSI_SetCalibTrimming(16);
+  LL_RCC_PLL_ConfigDomain_SYS(LL_RCC_PLLSOURCE_HSI, LL_RCC_PLL_MUL_4, LL_RCC_PLL_DIV_2);
+  LL_RCC_PLL_Enable();
+
+   /* Wait till PLL is ready */
+  while(LL_RCC_PLL_IsReady() != 1)
+  {
+
+  }
   LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
   LL_RCC_SetAPB1Prescaler(LL_RCC_APB1_DIV_1);
   LL_RCC_SetAPB2Prescaler(LL_RCC_APB2_DIV_1);
-  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_MSI);
+  LL_RCC_SetSysClkSource(LL_RCC_SYS_CLKSOURCE_PLL);
 
    /* Wait till System clock is ready */
-  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_MSI)
+  while(LL_RCC_GetSysClkSource() != LL_RCC_SYS_CLKSOURCE_STATUS_PLL)
   {
 
   }
 
-  LL_InitTick(SystemCoreClock, (uint32_t)SystemTickUs);
+  LL_Init1msTick(32000000);
 
-  LL_SetSystemCoreClock(SystemCoreClock);
+  LL_SetSystemCoreClock(32000000);
 }
 
 /**
@@ -306,6 +307,7 @@ void SystemClock_Config(void)
   */
 static void MX_GPIO_Init(void)
 {
+  LL_EXTI_InitTypeDef EXTI_InitStruct = {0};
   LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
@@ -338,10 +340,36 @@ static void MX_GPIO_Init(void)
   LL_GPIO_ResetOutputPin(S_NRST_GPIO_Port, S_NRST_Pin);
 
   /**/
-  GPIO_InitStruct.Pin = LIMIT_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
-  LL_GPIO_Init(LIMIT_GPIO_Port, &GPIO_InitStruct);
+  LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE9);
+
+  /**/
+  LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTA, LL_SYSCFG_EXTI_LINE0);
+
+  /**/
+  LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_9, LL_GPIO_PULL_NO);
+
+  /**/
+  LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_NO);
+
+  /**/
+  LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_9, LL_GPIO_MODE_INPUT);
+
+  /**/
+  LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_INPUT);
+
+  /**/
+  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_9;
+  EXTI_InitStruct.LineCommand = ENABLE;
+  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
+  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_RISING;
+  LL_EXTI_Init(&EXTI_InitStruct);
+
+  /**/
+  EXTI_InitStruct.Line_0_31 = LL_EXTI_LINE_0;
+  EXTI_InitStruct.LineCommand = ENABLE;
+  EXTI_InitStruct.Mode = LL_EXTI_MODE_IT;
+  EXTI_InitStruct.Trigger = LL_EXTI_TRIGGER_RISING;
+  LL_EXTI_Init(&EXTI_InitStruct);
 
   /**/
   GPIO_InitStruct.Pin = SW0_Pin;
@@ -354,12 +382,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = LL_GPIO_PULL_UP;
   LL_GPIO_Init(SW1_GPIO_Port, &GPIO_InitStruct);
-
-  /**/
-  GPIO_InitStruct.Pin = S_NFLT_Pin;
-  GPIO_InitStruct.Mode = LL_GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
-  LL_GPIO_Init(S_NFLT_GPIO_Port, &GPIO_InitStruct);
 
   /**/
   GPIO_InitStruct.Pin = HOME_Pin;

@@ -121,15 +121,15 @@ void PendSV_Handler(void)
 /**
   * @brief This function handles System tick timer.
   */
-__attribute__ ((weak)) void SysTick_Handler(void) 
+  
+  
+void mySysTick_Handler(void);
+void myIRQ_0_1(void);
+void myIRQ_4_15(void);
+  
+void SysTick_Handler(void)
 {
-  /* USER CODE BEGIN SysTick_IRQn 0 */
-
-  /* USER CODE END SysTick_IRQn 0 */
-
-  /* USER CODE BEGIN SysTick_IRQn 1 */
-
-  /* USER CODE END SysTick_IRQn 1 */
+  mySysTick_Handler();
 }
 
 /******************************************************************************/
@@ -139,7 +139,30 @@ __attribute__ ((weak)) void SysTick_Handler(void)
 /* please refer to the startup file (startup_stm32l0xx.s).                    */
 /******************************************************************************/
 
-/* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles EXTI line 0 and line 1 interrupts.
+  */
+  
 
-/* USER CODE END 1 */
+void EXTI0_1_IRQHandler(void)
+{
+  if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_0) != RESET)
+  {
+    LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_0);
+    myIRQ_0_1();
+  }
+}
+
+/**
+  * @brief This function handles EXTI line 4 to 15 interrupts.
+  */
+void EXTI4_15_IRQHandler(void)
+{
+  if (LL_EXTI_IsActiveFlag_0_31(LL_EXTI_LINE_9) != RESET)
+  {
+    LL_EXTI_ClearFlag_0_31(LL_EXTI_LINE_9);
+    myIRQ_4_15();
+  }
+}
+
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
