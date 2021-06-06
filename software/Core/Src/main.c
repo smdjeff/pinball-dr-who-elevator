@@ -23,6 +23,8 @@ static void MX_GPIO_Init(void);
 #define HAL_GetTick()                       (systick)
 // tuned at 10s, assumes 32MHz sysclock
 #define delayUs(us)                         for (int i=0;i<us*6;i++){ asm("nop"); }
+#define SECONDS_TO_TICKS(s)                 ((s)*1000)
+#define MINUTES_TO_TICKS(s)                 (SECONDS_TO_TICKS(s)*60)
 
 // tuned on 6/1/2021
 #define rodInchesPerRotation                0.316
@@ -35,6 +37,7 @@ static void MX_GPIO_Init(void);
 #define STEP_SIZE                           400
 
 
+static void optoSimulator(void);
 
 static volatile uint32_t systick = 0;
 // called from stm32l0xx_it.c weak link ISR
@@ -105,10 +108,18 @@ static bool debouncedSwitch(button_t id) {
     return false; // button released or button hasn't changed
 }
 
-// static float camAngle = 0;
-
+static int camSteps = 0;
+static direction_t camDirection = 0;
 
 static void stepDirection(direction_t direction) {
+  camDirection = direction;
+  // int a = camSteps;// / (int)stepsPerCamDegree;  // approx 12 per degree.
+  // if ( a < (int)(0*stepsPerCamDegree) )   { a += (int)(360*stepsPerCamDegree); }
+  // if ( a > (int)(360*stepsPerCamDegree) ) { a -= (int)(360*stepsPerCamDegree); }
+  // if ( a >= (int)(175*stepsPerCamDegree) ) {
+  //   // the linear mechnaism only moves 180 degrees, and then reverses 
+  //   direction = -direction;
+  // }
   HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, (direction==cw) ? 0:1 );
 }
 
@@ -117,6 +128,10 @@ static void stepSingle(void) {
   LL_GPIO_SetOutputPin( S_STEP_GPIO_Port, S_STEP_Pin );
   delayUs( STEP_SIZE );
   LL_GPIO_ResetOutputPin( S_STEP_GPIO_Port, S_STEP_Pin );
+  
+  camSteps += camDirection;
+  // only really need to do this every 11 degrees or so (aka stepsPerCamDegree:12.306610 x 11 = 135 steps)
+  optoSimulator(); 
 }
 
 static int stepSize(uint8_t sz) {
@@ -129,6 +144,7 @@ static int stepSize(uint8_t sz) {
 }
 
 static void move(direction_t direction, int steps) {
+  HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 0 );
   stepDirection( direction );
 
   // accelerate...
@@ -151,48 +167,35 @@ static void move(direction_t direction, int steps) {
       stepSingle();
     }
   }
-
-  //camAngle += (steps * direction) / stepsPerCamDegree;
 }
 
-static void writeWilliams(int direction, int position) {
-  static int ix = 0;
+/*
+stepsPerRotation:200
+stepsPerInch:632.911392
+stepsPerLevel:1107.594937
+stepsPerCamDegree:12.306610
+
+every 100 steps look up table:
+accel
+flat1(8) 0(16) 0 0 0 0 0 0 0 0 1(90) 1 1 1 1 1 1 1 1 1 0(172) 1(180) 1 1 1 0(213) 0 0 0 0 0 0 1(270) 1 1 1 1 1 1 0(328) 0 0 0 
+decel
+*/
+
+static void optoSimulator(void) {
   // convert the motor position to something the factory williams game
-  // thinks is the rotating cam and home opto input.
-  // cw -> 
-  // ccw <- 
-  uint8_t values[] = { 0, // first floor 
-                       1,1,1,1,1,1,1, // second floor
-                       0,0,0,0,0,0,0, // thrid floor 
-                       1,0,0,0,0,1,1,1,1, // second floor
-                       0,0,0,0, 1,1,1 // first floor 
-                     };
-  ix += direction;
-  if ( ix < 0 ) {
-    ix = sizeof(values)-1;
+  // thinks is the opto sensor shining through the slots on the rotating cam
+  int a = camSteps;// / (int)stepsPerCamDegree;  // approx 12 per degree.
+  if ( a < (int)(0*stepsPerCamDegree) )   { a += (int)(360*stepsPerCamDegree); }
+  if ( a > (int)(360*stepsPerCamDegree) ) { a -= (int)(360*stepsPerCamDegree); }
+  if ( ( a >= (int)(0*stepsPerCamDegree) && a <= (int)(11*stepsPerCamDegree) ) || 
+       ( a >= (int)(90*stepsPerCamDegree) && a <= (int)(168*stepsPerCamDegree) ) || 
+       ( a >= (int)(180*stepsPerCamDegree) && a <= (int)(212*stepsPerCamDegree) ) || 
+       ( a >= (int)(270*stepsPerCamDegree) && a <= (int)(326*stepsPerCamDegree) ) ) {
+    LL_GPIO_SetOutputPin( HOME_GPIO_Port, HOME_Pin );
   } else {
-    if ( ix >= sizeof(values) ) {
-      ix = 0;
-    }
-  }
-  HAL_GPIO_WritePin( HOME_GPIO_Port, HOME_Pin, values[ix] );
-}
-
-static void readWilliams(void) {
-  int enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
-  int direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
-
-  if ( enable ) {
-      if ( direction ) {
-        move( cw, 1000 );
-      } else {
-        move( ccw, 1000 );
-      }
-      // and while that's going, start sending writeWilliams values 
+    LL_GPIO_ResetOutputPin( HOME_GPIO_Port, HOME_Pin );
   }
 }
-
-
 
 
 int main(void)
@@ -226,26 +229,43 @@ int main(void)
     stepSingle();
     if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == 1 ) { ct++; } else { ct=0; }
   } while ( ct < 4 ); // debounce
-    
+  
+  // we're homed at 0 degrees
+  optoSimulator(); // force zero cam angle
+  camSteps = 0;
+  
   fault = false;
   
   while (1) {
     
     uint32_t tick = HAL_GetTick();
-    static uint32_t lasttick = 0;
+    static uint32_t inactivityTimer = 0;
 
-    if ( fault ) {
-      if (tick-lasttick > 500) {
-        lasttick = tick;
-        HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, ! HAL_GPIO_ReadPin(S_NEN_GPIO_Port,S_NEN_Pin) );
-      }
+    // might be some accidental triggering here, depends on how long the 
+    // williams cpu takes to deassert the motor enable signal
+    int enable = !HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
+    int direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
+    if ( enable ) {
+        inactivityTimer = tick;
+        if ( direction ) {
+          move( cw, stepsPerLevel );
+        } else {
+          move( ccw, stepsPerLevel );
+        }
+    }
+
+    if ( fault || tick-inactivityTimer > MINUTES_TO_TICKS(1)) {
+      inactivityTimer = tick;
+      HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, 1 );
     }
     
     if ( debouncedSwitch( left ) ) {
+      inactivityTimer = tick;
       // move up a bit
       move( cw, stepsPerLevel );
     }
     if ( debouncedSwitch( right ) ) {
+      inactivityTimer = tick;
       // move down a bit
       move( ccw, stepsPerLevel );
     }
