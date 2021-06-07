@@ -44,7 +44,7 @@ stepsPerPercentOfLevel: 11.07594937
 #define stepsPerPercentOfLevel              (stepsPerLevel / 100)
 
 #define STEP_RAMP                           4
-#define STEP_SIZE                           400
+#define STEP_SIZE                           500
 
 
 
@@ -102,14 +102,24 @@ typedef enum {
 }  step_size_t;
  
 typedef enum {
-    cam_dir_cw = 0,
-    cam_dir_ccw = 1
-} cam_dir_t;
+    motor_dir_cw = 1,
+    motor_dir_ccw = 0
+} motor_dir_t;
+
+typedef enum {
+    motor_enable = 0,
+    motor_disable = 1
+} motor_enable_t;
 
 typedef enum {
     opto_open = 0,
     opto_closed = 1
 } opto_t;
+
+typedef enum {
+    limit_off = 0,
+    limit_hit = 1,
+} limit_t;
 
 typedef enum {
     level_down  = 0,
@@ -144,7 +154,7 @@ static bool debouncedSwitch(button_t id) {
     if ( reading != lastButtonState[id] ) {
       lastDebounceTime[id] = millis;
     }
-    uint32_t debounceDelay = buttonState[id] ? 25 : 250;
+    uint32_t debounceDelay = buttonState[id] ? 25 : 50;
     if ( (millis - lastDebounceTime[id]) > debounceDelay ) {
       if ( reading != buttonState[id] ) {
         buttonState[id] = reading;
@@ -169,7 +179,8 @@ static void stepSingle(void) {
   if ( steps++ >= stepsPerPercentOfLevel ) {
     steps = 0;
     step_percentage++;
-    if ( step_percentage == step_percentage_toggle ) {
+    if ( step_percentage >= step_percentage_toggle ) {
+      step_percentage_toggle = 999;
       HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
     }
   }
@@ -212,14 +223,6 @@ static void move(step_dir_t dir, int steps, int opto_toggle) {
       stepSingle();
     }
   }
-  
-  // simulate the "complete" event on the original cam
-  // it's closed for ccw moves and open for cw moves
-  HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
-  
-  // stall a bit for the williams cpu to see that we completed the move
-  // allowing it to properly decide to disable or enable the dc motor enable signal
-  delayMs( 500 );
 }
 
 
@@ -239,21 +242,23 @@ int main(void)
   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_enable );
   HAL_GPIO_WritePin( S_NRST_GPIO_Port, S_NRST_Pin, step_deassert );
 
-  // move off the switch (we're probably on it)
-  int m = stepSize( step_size_4th );
-  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, step_dir_up );
-  for (int i=0; i<stepsPerRotation*m; i++) {
-    stepSingle();
+  // move off the switch
+  if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == limit_hit ) {
+    int m = stepSize( step_size_4th );
+    HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, step_dir_up );
+    for (int i=0; i<stepsPerRotation*m; i++) {
+      stepSingle();
+    }
   }
 
   // find the switch at slow speed
-  stepSize( step_size_16th );
+  stepSize( step_size_8th );
   HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, step_dir_down );
   int ct = 0;
   do {
     stepSingle();
-    if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == 1 ) { ct++; } else { ct=0; }
-  } while ( ct < 4 ); // debounce
+    if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == limit_hit ) { ct++; } else { ct=0; }
+  } while ( ct < 2 ); // debounce
   
   // once we zero the stepper, we can allow the machine to "home the cam"
   // machine will try to home the to cam CW down, where opto is open at complete
@@ -267,62 +272,83 @@ int main(void)
     
     uint32_t tick = HAL_GetTick();
     static uint32_t inactivityTimer = 0;
+
+    // note: wpc89 is 6809 @2MHz, 2 instructions per 1us
+    motor_enable_t enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
+    delayUs(10);
+
+    if ( enable == motor_enable ) {
+      inactivityTimer = tick;
+
+      motor_dir_t direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
+      
+    // if ( debouncedSwitch( but_left ) ) {
+    //   enable = true;
+    //   direction = motor_dir_ccw;
+    // }
+    // if ( debouncedSwitch( but_right ) ) {
+    //   enable = true;
+    //   direction = motor_dir_cw;
+    // }
     
-    int enable = !HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
-    int direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
-    
-    if ( debouncedSwitch( but_left ) ) {
-      enable = true;
-      direction = cam_dir_ccw;
-    }
-    if ( debouncedSwitch( but_right ) ) {
-      enable = true;
-      direction = cam_dir_cw;
-    }
-    
-    if ( enable ) {
-        inactivityTimer = tick;
+        static motor_dir_t last_direction = motor_dir_cw;
+        if ( direction != last_direction ) {
+          HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
+          last_direction = direction;
+        }
         
-        if ( direction == cam_dir_ccw ) {
+        if ( direction == motor_dir_ccw ) {
+    
+          // adjustments to percentages made to account for delays in moving
+          // a timer would probably work better than a percentage of the step motion
+          
           switch ( current_level ) {
             case level_down:
-              move( step_dir_up, stepsPerLevel, 10/*perc of move to open opto*/);
+              move( step_dir_up, stepsPerLevel, 5/*perc of move to open opto*/);
               current_level = level_mid_r;
               break;
             case level_mid_r:
-              move( step_dir_up, stepsPerLevel, 90/*perc of move to open opto*/);
+              move( step_dir_up, stepsPerLevel, 98/*perc of move to open opto*/);
               current_level = level_up;
-              break;
-            case level_up:
-              move( step_dir_down, stepsPerLevel, 33/*perc of move to open opto*/);
-              current_level = level_mid_l;
               break;
             case level_mid_l:
               move( step_dir_down, stepsPerLevel, 66/*perc of move to open opto*/);
               current_level = level_down;
               break;
-            }
+            case level_up:
+              move( step_dir_down, stepsPerLevel, 45/*perc of move to open opto*/);
+              current_level = level_mid_l;
+              break;
+          }
+          
         } else {
+
           switch ( current_level ) {
             case level_down:
               move( step_dir_up, stepsPerLevel, 33/*perc of move to close opto*/);
               current_level = level_mid_l;
               break;
-            case level_mid_r:
-              move( step_dir_up, stepsPerLevel, 66/*perc of move to close opto*/);
+            case level_mid_l:
+              move( step_dir_up, stepsPerLevel, 85/*perc of move to close opto*/);
               current_level = level_up;
               break;
             case level_up:
-              move( step_dir_down, stepsPerLevel, 10/*perc of move to close opto*/);
+              move( step_dir_down, stepsPerLevel, 5/*perc of move to close opto*/);
               current_level = level_mid_r;
               break;
-            case level_mid_l:
-              move( step_dir_down, stepsPerLevel, 90/*perc of move to close opto*/);
+            case level_mid_r:
+              move( step_dir_down, stepsPerLevel, 98/*perc of move to close opto*/);
               current_level = level_down;
               break;
-            }
+          }
         }
-          
+
+        // signal complete to the wpc89
+        HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
+        
+        // stall a bit for the williams cpu to see that we completed the move
+        // allowing it to properly decide to disable or enable the dc motor enable signal
+        delayMs( 10 );
           
     }
 
