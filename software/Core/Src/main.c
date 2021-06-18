@@ -43,7 +43,7 @@ stepsPerPercentOfLevel: 11.07594937
 #define stepsPerCamDegree                   (stepsPerLevel / 90)
 #define stepsPerPercentOfLevel              (stepsPerLevel / 100)
 
-#define STEP_RAMP                           4
+#define STEP_RAMP                           3
 #define STEP_SIZE                           500
 
 
@@ -75,6 +75,12 @@ typedef enum {
     but_left    = 0,
     but_right   = 1,
     but_limit   = 2
+} button_id_t;
+
+// normally open (pulled up), grounded on closed
+typedef enum {
+    button_pressed = 0,
+    button_released = 1
 } button_t;
 
 typedef enum {
@@ -112,10 +118,11 @@ typedef enum {
 } motor_enable_t;
 
 typedef enum {
-    opto_open = 0,
-    opto_closed = 1
+    opto_open = 1,
+    opto_closed = 0
 } opto_t;
 
+// normally open (pulled up), grounded on closed
 typedef enum {
     limit_off = 0,
     limit_hit = 1,
@@ -133,7 +140,7 @@ static int step_percentage_toggle = 0;
 static level_t current_level = 0;
 
 
-static uint8_t readPin(button_t id) {
+static uint8_t readPin(button_id_t id) {
   switch ( id ) {
     case but_left:
       return HAL_GPIO_ReadPin( SW0_GPIO_Port, SW0_Pin ); 
@@ -145,27 +152,24 @@ static uint8_t readPin(button_t id) {
   return 0;
 }
 
-static bool debouncedSwitch(button_t id) {
-    static uint32_t lastDebounceTime[3] = {0,0,0};
-    static uint8_t buttonState[3] = {1,1,1};
-    static uint8_t lastButtonState[3] = {1,1,1};
-    uint32_t millis = HAL_GetTick();
-    uint8_t reading = readPin( id );
-    if ( reading != lastButtonState[id] ) {
-      lastDebounceTime[id] = millis;
-    }
-    uint32_t debounceDelay = buttonState[id] ? 25 : 50;
-    if ( (millis - lastDebounceTime[id]) > debounceDelay ) {
-      if ( reading != buttonState[id] ) {
-        buttonState[id] = reading;
-        if ( reading == 0 ) { // button is active low
-          lastButtonState[id] = reading;
-          return true;
-        }
+static uint32_t buttonHeldMs(button_id_t id) {
+    static uint32_t pressed[3] = {0, 0, 0};
+    static uint8_t old[3] = {button_released, button_released, button_released};
+    uint32_t ret = 0;
+    uint32_t ms = HAL_GetTick();
+    uint8_t button = readPin( id );
+    
+    if ( button != old[ id ] ) {
+      if ( button == button_pressed ) {
+        pressed[ id ] = ms;
+      } else { 
+        // button_released
+        // return how long it was held
+        ret = ms - pressed[ id ];
       }
     }
-    lastButtonState[id] = reading;
-    return false; // button released or button hasn't changed
+    old[ id ] = button;
+    return ret;
 }
 
 
@@ -225,6 +229,84 @@ static void move(step_dir_t dir, int steps, int opto_toggle) {
   }
 }
 
+static void moveSteps( step_dir_t direction, int steps, step_size_t sz ) {
+  HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_enable );
+  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, direction );
+  delayUs(10);
+
+  int m = stepSize( sz );
+  for (int i=0; i<steps*m; i++) {
+    stepSingle();
+  }
+}
+
+static void moveLevel( motor_dir_t direction ) {
+  static motor_dir_t last_direction = motor_dir_cw;
+  if ( direction != last_direction ) {
+    HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
+    last_direction = direction;
+  }
+  
+  if ( direction == motor_dir_ccw ) {
+
+    // adjustments to percentages made to account for delays in moving
+    // a timer would probably work better than a percentage of the step motion
+    
+    // note: the WPC diagnostics errors correspond to the level you're going to
+
+    // CCW cam direction
+
+    switch ( current_level ) {
+      case level_down: // where you are
+        move( step_dir_up, stepsPerLevel, 5/*perc of move to open opto*/); // blocking
+        current_level = level_mid_r; // where you're going
+        break;
+      case level_mid_r:
+        move( step_dir_up, stepsPerLevel, 98/*perc of move to open opto*/);
+        current_level = level_up;
+        break;
+      case level_mid_l:
+        move( step_dir_down, stepsPerLevel, 66/*perc of move to open opto*/);
+        current_level = level_down;
+        break;
+      case level_up:
+        move( step_dir_down, stepsPerLevel, 45/*perc of move to open opto*/);
+        current_level = level_mid_l;
+        break;
+    }
+    
+  } else {
+
+    // CW cam direction
+
+    switch ( current_level ) {
+      case level_down:
+        move( step_dir_up, stepsPerLevel, 45/*perc of move to close opto*/);
+        current_level = level_mid_l;
+        break;
+      case level_mid_l:
+        move( step_dir_up, stepsPerLevel, 66/*perc of move to close opto*/);
+        current_level = level_up;
+        break;
+      case level_up:
+        move( step_dir_down, stepsPerLevel, 5/*perc of move to close opto*/);
+        current_level = level_mid_r;
+        break;
+      case level_mid_r:
+        move( step_dir_down, stepsPerLevel, 98/*perc of move to close opto*/);
+        current_level = level_down;
+        break;
+    }
+  }
+
+  // signal complete to the wpc89
+  HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
+  
+  // stall a bit for the williams cpu to see that we completed the move
+  // allowing it to properly decide to disable or enable the dc motor enable signal
+  delayMs( 10 );
+}
+
 
 int main(void)
 {
@@ -244,11 +326,7 @@ int main(void)
 
   // move off the switch
   if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == limit_hit ) {
-    int m = stepSize( step_size_4th );
-    HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, step_dir_up );
-    for (int i=0; i<stepsPerRotation*m; i++) {
-      stepSingle();
-    }
+    moveSteps( step_dir_up, stepsPerRotation, step_size_4th );
   }
 
   // find the switch at slow speed
@@ -273,83 +351,34 @@ int main(void)
     uint32_t tick = HAL_GetTick();
     static uint32_t inactivityTimer = 0;
 
-    // note: wpc89 is 6809 @2MHz, 2 instructions per 1us
-    motor_enable_t enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
-    delayUs(10);
-
-    if ( enable == motor_enable ) {
+    uint32_t press = buttonHeldMs( but_right );
+    if ( press > 10 ) {
       inactivityTimer = tick;
-
-      motor_dir_t direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
-      
-    // if ( debouncedSwitch( but_left ) ) {
-    //   enable = true;
-    //   direction = motor_dir_ccw;
-    // }
-    // if ( debouncedSwitch( but_right ) ) {
-    //   enable = true;
-    //   direction = motor_dir_cw;
-    // }
+      if ( press > 500 ) {
+        moveLevel( motor_dir_cw );
+      } else {
+        moveSteps( step_dir_up, 1, step_size_4th );
+      }
+    }
     
-        static motor_dir_t last_direction = motor_dir_cw;
-        if ( direction != last_direction ) {
-          HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
-          last_direction = direction;
-        }
-        
-        if ( direction == motor_dir_ccw ) {
-    
-          // adjustments to percentages made to account for delays in moving
-          // a timer would probably work better than a percentage of the step motion
-          
-          switch ( current_level ) {
-            case level_down:
-              move( step_dir_up, stepsPerLevel, 5/*perc of move to open opto*/);
-              current_level = level_mid_r;
-              break;
-            case level_mid_r:
-              move( step_dir_up, stepsPerLevel, 98/*perc of move to open opto*/);
-              current_level = level_up;
-              break;
-            case level_mid_l:
-              move( step_dir_down, stepsPerLevel, 66/*perc of move to open opto*/);
-              current_level = level_down;
-              break;
-            case level_up:
-              move( step_dir_down, stepsPerLevel, 45/*perc of move to open opto*/);
-              current_level = level_mid_l;
-              break;
-          }
-          
-        } else {
+    press = buttonHeldMs( but_left );
+    if ( press > 10 ) {
+      inactivityTimer = tick;
+      if ( press > 500 ) {
+        moveLevel( motor_dir_ccw );
+      } else {
+        moveSteps( step_dir_down, 1, step_size_4th );
+      }
+    }
 
-          switch ( current_level ) {
-            case level_down:
-              move( step_dir_up, stepsPerLevel, 33/*perc of move to close opto*/);
-              current_level = level_mid_l;
-              break;
-            case level_mid_l:
-              move( step_dir_up, stepsPerLevel, 85/*perc of move to close opto*/);
-              current_level = level_up;
-              break;
-            case level_up:
-              move( step_dir_down, stepsPerLevel, 5/*perc of move to close opto*/);
-              current_level = level_mid_r;
-              break;
-            case level_mid_r:
-              move( step_dir_down, stepsPerLevel, 98/*perc of move to close opto*/);
-              current_level = level_down;
-              break;
-          }
-        }
-
-        // signal complete to the wpc89
-        HAL_GPIO_TogglePin( HOME_GPIO_Port, HOME_Pin );
-        
-        // stall a bit for the williams cpu to see that we completed the move
-        // allowing it to properly decide to disable or enable the dc motor enable signal
-        delayMs( 10 );
-          
+    motor_enable_t enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
+    // note: wpc89 is only 6809 @2MHz, 2 instructions per 1us
+    // so stall a bit to allow both the enable and direction pins to stabilize
+    delayUs(10);
+    if ( enable == motor_enable ) {
+        inactivityTimer = tick;
+        motor_dir_t direction = HAL_GPIO_ReadPin( DIR_GPIO_Port, DIR_Pin );
+        moveLevel( direction );
     }
 
     if ( fault || tick-inactivityTimer > MINUTES_TO_TICKS(1)) {
@@ -447,21 +476,18 @@ static void MX_GPIO_Init(void)
   LL_GPIO_ResetOutputPin(S_NRST_GPIO_Port, S_NRST_Pin);
 
   /**/
+  
+  // #define LIMIT_Pin LL_GPIO_PIN_9
+  // #define LIMIT_GPIO_Port GPIOB  
+  // #define S_NFLT_Pin LL_GPIO_PIN_0
+  // #define S_NFLT_GPIO_Port GPIOA
   LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTB, LL_SYSCFG_EXTI_LINE9);
-
-  /**/
   LL_SYSCFG_SetEXTISource(LL_SYSCFG_EXTI_PORTA, LL_SYSCFG_EXTI_LINE0);
 
-  /**/
-  LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_9, LL_GPIO_PULL_NO);
+  LL_GPIO_SetPinPull(GPIOB, LL_GPIO_PIN_9, LL_GPIO_PULL_UP);
+  LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_UP);
 
-  /**/
-  LL_GPIO_SetPinPull(GPIOA, LL_GPIO_PIN_0, LL_GPIO_PULL_NO);
-
-  /**/
   LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_9, LL_GPIO_MODE_INPUT);
-
-  /**/
   LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_0, LL_GPIO_MODE_INPUT);
 
   /**/
