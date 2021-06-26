@@ -229,13 +229,14 @@ static void move(step_dir_t dir, int steps, int opto_toggle) {
   }
 }
 
-static void moveSteps( step_dir_t direction, int steps, step_size_t sz ) {
+static void moveSteps( int steps, step_size_t sz ) {
   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_enable );
+  step_dir_t direction = (steps>0) ? step_dir_up : step_dir_down;
   HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, direction );
   delayUs(10);
 
   int m = stepSize( sz );
-  for (int i=0; i<steps*m; i++) {
+  for (int i=0; i<abs(steps)*m; i++) {
     stepSingle();
   }
 }
@@ -308,6 +309,43 @@ static void moveLevel( motor_dir_t direction ) {
 }
 
 
+#define EEPROM_BASE_ADDR	0x08080000	
+#define FLASH_PEKEY1               ((uint32_t)0x89ABCDEFU)
+#define FLASH_PEKEY2               ((uint32_t)0x02030405U)
+#define FLASH_PRGKEY1              ((uint32_t)0x8C9DAEBFU)
+#define FLASH_PRGKEY2              ((uint32_t)0x13141516U)
+
+static void eeUnlock(void) {
+  if((FLASH->PECR & FLASH_PECR_PRGLOCK) != RESET) {
+    if((FLASH->PECR & FLASH_PECR_PELOCK) != RESET) {  
+       FLASH->PEKEYR = FLASH_PEKEY1;
+       FLASH->PEKEYR = FLASH_PEKEY2;
+    }
+    FLASH->PRGKEYR = FLASH_PRGKEY1;
+    FLASH->PRGKEYR = FLASH_PRGKEY2;  
+  }
+}
+
+static void eeLock(void) {
+  SET_BIT(FLASH->PECR, FLASH_PECR_PRGLOCK);
+}
+
+static void eeWrite(uint32_t offset, int32_t value)
+{
+  __disable_irq();
+  eeUnlock();
+  *(__IO int32_t*)(EEPROM_BASE_ADDR + offset) = value;
+  while(FLASH->SR&FLASH_SR_BSY);
+  eeLock();
+  __enable_irq();
+}
+
+static void eeRead(uint32_t offset, int32_t *value)
+{
+  *value = *(__IO int32_t*)(EEPROM_BASE_ADDR + offset);
+}
+
+
 int main(void)
 {
   LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
@@ -326,7 +364,7 @@ int main(void)
 
   // move off the switch
   if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == limit_hit ) {
-    moveSteps( step_dir_up, stepsPerRotation, step_size_4th );
+    moveSteps( stepsPerRotation, step_size_4th );
   }
 
   // find the switch at slow speed
@@ -337,12 +375,27 @@ int main(void)
     stepSingle();
     if ( HAL_GPIO_ReadPin(LIMIT_GPIO_Port,LIMIT_Pin) == limit_hit ) { ct++; } else { ct=0; }
   } while ( ct < 2 ); // debounce
+
+  // and now the user's fine adjustment stored from non-voltaile
+  int32_t pressSteps = 0;
+  eeRead( 0/*offset*/, &pressSteps );
+  // // blink the press step adjustment count on the led
+  // HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_disable );
+  // delayMs(500);
+  // for (int i=0; i<pressSteps; i++) {
+  //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_enable );
+  //   delayMs(10);
+  //   HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_disable );
+  //   delayMs(100);
+  // }
+  moveSteps( pressSteps, step_size_8th );
   
   // once we zero the stepper, we can allow the machine to "home the cam"
   // machine will try to home the to cam CW down, where opto is open at complete
   // just to the right of the little nub on the cam
   current_level = level_down;
   HAL_GPIO_WritePin( HOME_GPIO_Port, HOME_Pin, opto_open );
+  HAL_GPIO_WritePin( S_DIR_GPIO_Port, S_DIR_Pin, step_dir_down );
   
   fault = false;
   
@@ -351,26 +404,31 @@ int main(void)
     uint32_t tick = HAL_GetTick();
     static uint32_t inactivityTimer = 0;
 
-    uint32_t press = buttonHeldMs( but_right );
-    if ( press > 10 ) {
+    uint32_t press_r = buttonHeldMs( but_right );
+    uint32_t press_l = buttonHeldMs( but_left );
+    
+    if ( press_r > 10 ) {
       inactivityTimer = tick;
-      if ( press > 500 ) {
+      if ( press_r > 500 ) {
         moveLevel( motor_dir_cw );
       } else {
-        moveSteps( step_dir_up, 1, step_size_4th );
+        moveSteps( 1, step_size_4th );
+        pressSteps++;
+        eeWrite( 0, pressSteps );
       }
     }
     
-    press = buttonHeldMs( but_left );
-    if ( press > 10 ) {
+    if ( press_l > 10 ) {
       inactivityTimer = tick;
-      if ( press > 500 ) {
+      if ( press_l > 500 ) {
         moveLevel( motor_dir_ccw );
       } else {
-        moveSteps( step_dir_down, 1, step_size_4th );
+        moveSteps( -1, step_size_4th );
+        pressSteps--;
+        eeWrite( 0, pressSteps );
       }
     }
-
+    
     motor_enable_t enable = HAL_GPIO_ReadPin( EN_GPIO_Port, EN_Pin );
     // note: wpc89 is only 6809 @2MHz, 2 instructions per 1us
     // so stall a bit to allow both the enable and direction pins to stabilize
@@ -381,13 +439,13 @@ int main(void)
         moveLevel( direction );
     }
 
-    if ( fault || tick-inactivityTimer > MINUTES_TO_TICKS(1)) {
+    if ( fault ) { //}|| tick-inactivityTimer > MINUTES_TO_TICKS(1)) {
       inactivityTimer = tick;
       HAL_GPIO_WritePin( S_NEN_GPIO_Port, S_NEN_Pin, step_disable );
     }
           
   }
-  
+
 }
 
 
